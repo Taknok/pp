@@ -16,15 +16,21 @@ fn print_type_of<T>(_: &T) {
 
 #[tokio::main]
 async fn main() {
-  let parser = PACParser::new().await;
+  let mut parser = PACParser::new().await;
 
   // create Proxy
   let addr = SocketAddr::from(([127, 0, 0, 1], 8888));
 
   // Create a hyper server and define the request handler
-  let make_svc = make_service_fn(|_conn| {
-    async {
-      Ok::<_, Infallible>(service_fn(handle_request))
+/*  let make_svc = make_service_fn(move |_conn| {
+    async move {
+      Ok::<_, Infallible>(service_fn(move |req| handle_request(req, parser)))
+    }
+  });*/
+
+    let make_svc = make_service_fn(move |_conn| {
+    async move {
+      Ok::<_, Infallible>(service_fn(move |req| dummy_req(req, parser)))
     }
   });
 
@@ -41,9 +47,14 @@ async fn main() {
   let host = String::from("google.com");
   let r = parser.find(&url, &host);
   println!("r2: {}", r);
-
 }
 
+fn dummy_req(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+  print_type_of(&req);
+  Ok(req)
+}
+
+/*
 fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
   // Get the request URL as a string
   let url_string = req.uri().to_string();
@@ -54,7 +65,7 @@ fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
     let base_url = url.origin().ascii_serialization();
         
     println!("Base URL: {}", base_url);
-    OK(base_url)
+    Ok(base_url)
   } else {
     println!("Invalid URL");
     Err("Invalid URL".to_string())
@@ -62,7 +73,7 @@ fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
 }
 
 // Function to handle incoming client requests
-async fn handle_request(req: Request<Body>, parser: PACParser<'_>) -> Result<Response<Body>, hyper::Error> {
+async fn handle_request(req: Request<Body>, mut parser: PACParser) -> Result<Response<Body>, hyper::Error> {
     let client = Client::new();
  
     let url = get_url(&req).expect("Error getting url from request");
@@ -77,15 +88,18 @@ async fn handle_request(req: Request<Body>, parser: PACParser<'_>) -> Result<Res
         .version(req.version());
     {
       let headers = modified_request.headers_mut().unwrap();
-      headers.extend(req.headers().iter());
+      print_type_of(&headers);
+/*      for r in req.headers().iter() {
+        headers.insert(r);
+      }*/
+      print_type_of(req.headers());
+      // headers.extend(req.headers());
     }
-    // let modified_request = modified_request.unwrap();
-        // .body(req.into_body());
-    
-     //   .unwrap();
+    let modified_request = modified_request.body(req.into_body()).unwrap();
     
     // Send the modified request to the destination server and get the response
     let res = client.request(modified_request).await?;
     
     Ok(res)
 }
+*/
