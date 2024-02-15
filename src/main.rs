@@ -1,8 +1,10 @@
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server};
+use hyper::{Body, Client, Request, Response, Server, Version};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use url::Url;
+use hyper::body::Bytes;
+use hyper::server::conn::AddrStream;
 
 mod pac_utils;
 use crate::pac_utils::PAC_UTILS;
@@ -28,9 +30,14 @@ async fn main() {
     }
   });*/
 
-    let make_svc = make_service_fn(move |_conn| {
+  let make_svc = make_service_fn(|socket: &AddrStream| {
+    let remote_addr = socket.remote_addr();
     async move {
-      Ok::<_, Infallible>(service_fn(move |req| dummy_req(req, parser)))
+        Ok::<_, Infallible>(service_fn(move |_: Request<Body>| async move {
+            Ok::<_, Infallible>(
+                Response::new(Body::from(format!("Hello, {}!", remote_addr)))
+            )
+        }))
     }
   });
 
@@ -49,10 +56,23 @@ async fn main() {
   println!("r2: {}", r);
 }
 
-fn dummy_req(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-  print_type_of(&req);
-  Ok(req)
+async fn my_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<hyper::Response<hyper::Body>, Infallible> {
+  Ok::<_, Infallible>(
+      Response::new(Body::from(format!("Hello ! {}", remote_addr)))
+    )
 }
+
+
+/*fn dummy_req(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
+  print_type_of(&req);
+  if req.version() == Version::HTTP_11 {
+    Ok(Response::new(Full::<Bytes>::from("Hello World")))
+  } else {
+    // Note: it's usually better to return a Response
+    // with an appropriate StatusCode instead of an Err.
+    Err("not HTTP/1.1, abort connection")
+  }
+}*/
 
 /*
 fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
