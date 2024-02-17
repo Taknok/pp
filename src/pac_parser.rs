@@ -8,6 +8,8 @@ pub struct PACParser {
   script: js_sandbox::Script,
 }
 
+unsafe impl Send for PACParser {}
+
 impl PACParser {
   pub async fn new() -> Self {
     let pac_content = Self::download_pac().await.expect("Error while downloading PAC");

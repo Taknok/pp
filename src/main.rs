@@ -1,9 +1,8 @@
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server, Version};
+use hyper::{Body, Client, Request, Response, Server};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use url::Url;
-use hyper::body::Bytes;
 use hyper::server::conn::AddrStream;
 
 mod pac_utils;
@@ -30,22 +29,20 @@ async fn main() {
     }
   });*/
 
-  let make_svc = make_service_fn(|socket: &AddrStream| {
+  let make_service = make_service_fn(|socket: &AddrStream| {
     let remote_addr = socket.remote_addr();
     async move {
-        Ok::<_, Infallible>(service_fn(move |_: Request<Body>| async move {
-            Ok::<_, Infallible>(
-                Response::new(Body::from(format!("Hello, {}!", remote_addr)))
-            )
-        }))
+        Ok::<_, Infallible>(service_fn(move |req: Request<Body>|
+          handle_request(req, remote_addr)
+        ))
     }
   });
 
   // Start the server
-  let server = Server::bind(&addr).serve(make_svc);
-    
+  let server = Server::bind(&addr).serve(make_service);
+
   println!("Proxy server started on http://{}", addr);
-    
+
   if let Err(e) = server.await {
     eprintln!("Server error: {}", e);
   }
@@ -56,34 +53,32 @@ async fn main() {
   println!("r2: {}", r);
 }
 
-async fn my_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<hyper::Response<hyper::Body>, Infallible> {
-  Ok::<_, Infallible>(
-      Response::new(Body::from(format!("Hello ! {}", remote_addr)))
-    )
+async fn handle_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<Response<Body>, hyper::Error> {
+  let mut parser = PACParser::new().await;
+
+  let client = Client::new();
+
+  let url = get_url(&req).expect("Error getting url from request");
+  let host = String::from(req.uri().host().unwrap());
+  let r = parser.find(&url, &host);
+  println!("r2: {}", r);
+
+  let (parts, body) = req.into_parts();
+  let modified_request = Request::from_parts(parts, body);
+
+  client.request(modified_request).await
 }
 
 
-/*fn dummy_req(req: Request<Body>) -> Result<Response<Body>, hyper::Error> {
-  print_type_of(&req);
-  if req.version() == Version::HTTP_11 {
-    Ok(Response::new(Full::<Bytes>::from("Hello World")))
-  } else {
-    // Note: it's usually better to return a Response
-    // with an appropriate StatusCode instead of an Err.
-    Err("not HTTP/1.1, abort connection")
-  }
-}*/
-
-/*
 fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
   // Get the request URL as a string
   let url_string = req.uri().to_string();
-    
+
   // Parse the URL using the `url` crate
   if let Ok(url) = Url::parse(&url_string) {
     // Get the URL without the path and query
     let base_url = url.origin().ascii_serialization();
-        
+
     println!("Base URL: {}", base_url);
     Ok(base_url)
   } else {
@@ -92,10 +87,11 @@ fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
   }
 }
 
+/*
 // Function to handle incoming client requests
 async fn handle_request(req: Request<Body>, mut parser: PACParser) -> Result<Response<Body>, hyper::Error> {
     let client = Client::new();
- 
+
     let url = get_url(&req).expect("Error getting url from request");
     let host = String::from(req.uri().host().unwrap());
     let r = parser.find(&url, &host);
@@ -116,10 +112,10 @@ async fn handle_request(req: Request<Body>, mut parser: PACParser) -> Result<Res
       // headers.extend(req.headers());
     }
     let modified_request = modified_request.body(req.into_body()).unwrap();
-    
+
     // Send the modified request to the destination server and get the response
     let res = client.request(modified_request).await?;
-    
+
     Ok(res)
 }
 */
