@@ -1,9 +1,12 @@
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{body, client, Request, Response, server};
+use tokio::net::TcpListener;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use url::Url;
-use hyper::server::conn::AddrStream;
+use hyper_util::rt::TokioIo;
 
 mod pac_utils;
 use crate::pac_utils::PAC_UTILS;
@@ -16,11 +19,31 @@ fn print_type_of<T>(_: &T) {
 }
 
 #[tokio::main]
-async fn main() {
-  let mut parser = PACParser::new().await;
-
+pub async fn main() {
   // create Proxy
   let addr = SocketAddr::from(([127, 0, 0, 1], 8888));
+
+  let listener = TcpListener::bind(addr).await?;
+  println!("Proxy server started on http://{}", addr);
+
+  loop {
+    let (tcp, _) = listener.accept().await?;
+    let remote_addr = tcp.peer_addr().unwrap();
+    let io = TokioIo::new(tcp);
+    tokio::task::spawn(async move {
+      // Handle the connection from the client using HTTP1 and pass any
+      // HTTP requests received on that connection to the `hello` function
+      if let Err(err) = http1::Builder::new()
+          .timer(TokioTimer)
+          .serve_connection(io, service_fn(move |req: Request<Incoming>|
+            handle_request(req, remote_addr)
+          ))
+          .await
+      {
+          println!("Error serving connection: {:?}", err);
+      }
+  });
+  }
 
   // Create a hyper server and define the request handler
 /*  let make_svc = make_service_fn(move |_conn| {
@@ -29,28 +52,28 @@ async fn main() {
     }
   });*/
 
-  let make_service = make_service_fn(|socket: &AddrStream| {
-    let remote_addr = socket.remote_addr();
-    async move {
-        Ok::<_, Infallible>(service_fn(move |req: Request<Body>|
-          handle_request(req, remote_addr)
-        ))
-    }
-  });
+  // let make_service = make_service_fn(|socket: &AddrStream| {
+  //   let remote_addr = socket.remote_addr();
+  //   async move {
+  //       Ok::<_, Infallible>(service_fn(move |req: Request<Body>|
+  //         handle_request(req, remote_addr)
+  //       ))
+  //   }
+  // });
 
-  // Start the server
-  let server = Server::bind(&addr).serve(make_service);
+  // // Start the server
+  // let server = Server::bind(&addr).serve(make_service);
 
-  println!("Proxy server started on http://{}", addr);
+  // println!("Proxy server started on http://{}", addr);
 
-  if let Err(e) = server.await {
-    eprintln!("Server error: {}", e);
-  }
+  // if let Err(e) = server.await {
+  //   eprintln!("Server error: {}", e);
+  // }
 
-  let url = String::from("https://google.com/");
-  let host = String::from("google.com");
-  let r = parser.find(&url, &host);
-  println!("r2: {}", r);
+  // let url = String::from("https://google.com/");
+  // let host = String::from("google.com");
+  // let r = parser.find(&url, &host);
+  // println!("r2: {}", r);
 }
 
 async fn handle_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<Response<Body>, hyper::Error> {
@@ -60,8 +83,14 @@ async fn handle_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<R
 
   let url = get_url(&req).expect("Error getting url from request");
   let host = String::from(req.uri().host().unwrap());
+  println!("url: {}", url);
+  println!("host: {}", host);
   let r = parser.find(&url, &host);
   println!("r2: {}", r);
+
+  let proxy_list = r.split(";");
+  let proxy_list: Vec<&str> = proxy_list.collect();
+  let proxy_list: Vec<&str> = proxy_list.iter().map(|i| i.trim()).collect();
 
   let (parts, body) = req.into_parts();
   let modified_request = Request::from_parts(parts, body);
@@ -73,8 +102,9 @@ async fn handle_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<R
 fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
   // Get the request URL as a string
   let url_string = req.uri().to_string();
+  Ok(url_string)
 
-  // Parse the URL using the `url` crate
+/*  // Parse the URL using the `url` crate
   if let Ok(url) = Url::parse(&url_string) {
     // Get the URL without the path and query
     let base_url = url.origin().ascii_serialization();
@@ -84,7 +114,7 @@ fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
   } else {
     println!("Invalid URL");
     Err("Invalid URL".to_string())
-  }
+  }*/
 }
 
 /*
