@@ -1,5 +1,13 @@
 // https://hg.mozilla.org/mozilla-central/raw-file/tip/netwerk/base/ascii_pac_utils.js
 
+use axum::http::request::Request;
+
+pub fn get_url<T>(req: &Request<T>) -> String {
+  // Get the request URL as a string
+  let url_string = req.uri().to_string();
+  url_string
+}
+
 pub const PAC_UTILS: &str = r#"
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this

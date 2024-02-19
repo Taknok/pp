@@ -1,12 +1,21 @@
+use axum::{
+  body::Body,
+  extract::Request,
+  http::{Method, StatusCode},
+  response::{IntoResponse, Response},
+  Router,
+};
+
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{body, client, Request, Response, server};
-use tokio::net::TcpListener;
-use std::convert::Infallible;
+use hyper::upgrade::Upgraded;
 use std::net::SocketAddr;
-use url::Url;
+use tokio::net::{TcpListener, TcpStream};
+use tower::Service;
+use tower::ServiceExt;
+
 use hyper_util::rt::TokioIo;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod pac_utils;
 use crate::pac_utils::PAC_UTILS;
@@ -14,138 +23,104 @@ use crate::pac_utils::PAC_UTILS;
 mod pac_parser;
 use crate::pac_parser::PACParser;
 
-fn print_type_of<T>(_: &T) {
-    println!("{}", std::any::type_name::<T>())
-}
-
 #[tokio::main]
-pub async fn main() {
-  // create Proxy
-  let addr = SocketAddr::from(([127, 0, 0, 1], 8888));
+async fn main() {
+  tracing_subscriber::registry()
+      .with(
+          tracing_subscriber::EnvFilter::try_from_default_env()
+              .unwrap_or_else(|_| "example_http_proxy=trace,tower_http=debug".into()),
+      )
+      .with(tracing_subscriber::fmt::layer())
+      .init();
 
-  let listener = TcpListener::bind(addr).await?;
-  println!("Proxy server started on http://{}", addr);
+  let router_svc = Router::new();
 
-  loop {
-    let (tcp, _) = listener.accept().await?;
-    let remote_addr = tcp.peer_addr().unwrap();
-    let io = TokioIo::new(tcp);
-    tokio::task::spawn(async move {
-      // Handle the connection from the client using HTTP1 and pass any
-      // HTTP requests received on that connection to the `hello` function
-      if let Err(err) = http1::Builder::new()
-          .timer(TokioTimer)
-          .serve_connection(io, service_fn(move |req: Request<Incoming>|
-            handle_request(req, remote_addr)
-          ))
-          .await
-      {
-          println!("Error serving connection: {:?}", err);
-      }
-  });
-  }
-
-  // Create a hyper server and define the request handler
-/*  let make_svc = make_service_fn(move |_conn| {
-    async move {
-      Ok::<_, Infallible>(service_fn(move |req| handle_request(req, parser)))
-    }
-  });*/
-
-  // let make_service = make_service_fn(|socket: &AddrStream| {
-  //   let remote_addr = socket.remote_addr();
-  //   async move {
-  //       Ok::<_, Infallible>(service_fn(move |req: Request<Body>|
-  //         handle_request(req, remote_addr)
-  //       ))
-  //   }
-  // });
-
-  // // Start the server
-  // let server = Server::bind(&addr).serve(make_service);
-
-  // println!("Proxy server started on http://{}", addr);
-
-  // if let Err(e) = server.await {
-  //   eprintln!("Server error: {}", e);
-  // }
-
-  // let url = String::from("https://google.com/");
-  // let host = String::from("google.com");
-  // let r = parser.find(&url, &host);
-  // println!("r2: {}", r);
-}
-
-async fn handle_request(req: Request<Body>, remote_addr: SocketAddr) -> Result<Response<Body>, hyper::Error> {
   let mut parser = PACParser::new().await;
 
-  let client = Client::new();
+  let tower_service = tower::service_fn(|req: Request<_>| {
+      let router_svc = router_svc.clone();
+      let req = req.map(Body::new);
 
-  let url = get_url(&req).expect("Error getting url from request");
-  let host = String::from(req.uri().host().unwrap());
-  println!("url: {}", url);
-  println!("host: {}", host);
-  let r = parser.find(&url, &host);
-  println!("r2: {}", r);
+      let url = pac_utils::get_url(&req);
+      let host = String::from(req.uri().host().unwrap());
+      println!("url: {}", url);
+      println!("host: {}", host);
+      // let r = parser.find(&url, &host);
+      // println!("r2: {}", r);
 
-  let proxy_list = r.split(";");
-  let proxy_list: Vec<&str> = proxy_list.collect();
-  let proxy_list: Vec<&str> = proxy_list.iter().map(|i| i.trim()).collect();
+      async move {
+          if req.method() == Method::CONNECT {
+              proxy(req).await
+          } else {
+              router_svc.oneshot(req).await.map_err(|err| match err {})
+          }
+      }
+  });
 
-  let (parts, body) = req.into_parts();
-  let modified_request = Request::from_parts(parts, body);
+  let hyper_service = hyper::service::service_fn(move |request: Request<Incoming>| {
+      tower_service.clone().call(request)
+  });
 
-  client.request(modified_request).await
+  let addr = SocketAddr::from(([127, 0, 0, 1], 8888));
+  tracing::debug!("listening on {}", addr);
+
+  let listener = TcpListener::bind(addr).await.unwrap();
+  loop {
+      let (stream, _) = listener.accept().await.unwrap();
+      let io = TokioIo::new(stream);
+      let hyper_service = hyper_service.clone();
+      tokio::task::spawn(async move {
+          if let Err(err) = http1::Builder::new()
+              .preserve_header_case(true)
+              .title_case_headers(true)
+              .serve_connection(io, hyper_service)
+              .with_upgrades()
+              .await
+          {
+              println!("Failed to serve connection: {:?}", err);
+          }
+      });
+  }
 }
 
+async fn proxy(req: Request) -> Result<Response, hyper::Error> {
+  tracing::trace!(?req);
 
-fn get_url<T>(req: &hyper::Request<T>) -> Result<String, String>{
-  // Get the request URL as a string
-  let url_string = req.uri().to_string();
-  Ok(url_string)
+  if let Some(host_addr) = req.uri().authority().map(|auth| auth.to_string()) {
+      tokio::task::spawn(async move {
+          match hyper::upgrade::on(req).await {
+              Ok(upgraded) => {
+                  if let Err(e) = tunnel(upgraded, host_addr).await {
+                      tracing::warn!("server io error: {}", e);
+                  };
+              }
+              Err(e) => tracing::warn!("upgrade error: {}", e),
+          }
+      });
 
-/*  // Parse the URL using the `url` crate
-  if let Ok(url) = Url::parse(&url_string) {
-    // Get the URL without the path and query
-    let base_url = url.origin().ascii_serialization();
-
-    println!("Base URL: {}", base_url);
-    Ok(base_url)
+      Ok(Response::new(Body::empty()))
   } else {
-    println!("Invalid URL");
-    Err("Invalid URL".to_string())
-  }*/
+      tracing::warn!("CONNECT host is not socket addr: {:?}", req.uri());
+      Ok((
+          StatusCode::BAD_REQUEST,
+          "CONNECT must be to a socket address",
+      )
+          .into_response())
+  }
 }
 
-/*
-// Function to handle incoming client requests
-async fn handle_request(req: Request<Body>, mut parser: PACParser) -> Result<Response<Body>, hyper::Error> {
-    let client = Client::new();
+async fn tunnel(upgraded: Upgraded, addr: String) -> std::io::Result<()> {
+  let mut server = TcpStream::connect(addr).await?;
+  let mut upgraded = TokioIo::new(upgraded);
 
-    let url = get_url(&req).expect("Error getting url from request");
-    let host = String::from(req.uri().host().unwrap());
-    let r = parser.find(&url, &host);
-    println!("r2: {}", r);
+  let (from_client, from_server) =
+      tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
 
-    // Modify the request to change the destination
-    let mut modified_request = Request::builder()
-        .method(req.method().clone())
-        .uri(format!("http://127.0.0.1:8080{}", req.uri()))
-        .version(req.version());
-    {
-      let headers = modified_request.headers_mut().unwrap();
-      print_type_of(&headers);
-/*      for r in req.headers().iter() {
-        headers.insert(r);
-      }*/
-      print_type_of(req.headers());
-      // headers.extend(req.headers());
-    }
-    let modified_request = modified_request.body(req.into_body()).unwrap();
+  tracing::debug!(
+      "client wrote {} bytes and received {} bytes",
+      from_client,
+      from_server
+  );
 
-    // Send the modified request to the destination server and get the response
-    let res = client.request(modified_request).await?;
-
-    Ok(res)
+  Ok(())
 }
-*/
